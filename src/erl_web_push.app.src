@@ -1,0 +1,12 @@
+{ application
+, erl_web_push
+, [ {description, "Web push library in Erlang"}
+  , {vsn, "0.1.0"}
+  , {registered, []}
+  , {applications, [kernel, stdlib, crypto]}
+  , {env, []}
+  , {modules, []}
+  , {licenses, ["https://github.com/truqu/erl_web_push/blob/develop/LICENSE"]}
+  , {links, [{"GitHub", "https://github.com/truqu/erl_web_push"}]}
+  ]
+}.

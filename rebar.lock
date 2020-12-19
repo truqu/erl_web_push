@@ -1,0 +1,8 @@
+{"1.2.0",
+[{<<"hkdf_erlang">>,{pkg,<<"hkdf_erlang">>,<<"0.1.1">>},0}]}.
+[
+{pkg_hash,[
+ {<<"hkdf_erlang">>, <<"B35538EDFFFEFC44D6855B2BFE2DC00909C2A4365F41E47D2FE493811006955E">>}]},
+{pkg_hash_ext,[
+ {<<"hkdf_erlang">>, <<"EB784BDA0DF4E964FD69F622310752198FB0218543E1A7393912ABC7A5CE926E">>}]}
+].
