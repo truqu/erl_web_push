@@ -15,20 +15,29 @@
 %%==============================================================================================
 %% API
 %%==============================================================================================
-%% TODO: Add a bunch of checks and error types
 %% TODO: Write docs
-%% TODO: Write tests
 
 -spec encrypt(Message, ClientPubKey, ClientAuthToken) -> {ok, Result} | {error, Error} when
     Message :: binary(),
     ClientPubKey :: binary(),
     ClientAuthToken :: binary(),
     Result :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
-    Error :: todo.
-encrypt(Message, ClientPubKey, ClientAuthToken) ->
-  Salt = crypto:strong_rand_bytes(16),
-  {ServerPubKey, ServerPrivKey} = crypto:generate_key(ecdh, prime256v1),
-  encrypt(Message, ClientPubKey, ClientAuthToken, Salt, ServerPubKey, ServerPrivKey).
+    Error :: message_too_long | invalid_pubkey_or_token.
+encrypt(Message, _, _) when byte_size(Message) > 4078 -> {error, message_too_long};
+encrypt(Message, ClientPubKey0, ClientAuthToken0) ->
+  ClientPubKey = base64_url_decode(ClientPubKey0),
+  ClientAuthToken = base64_url_decode(ClientAuthToken0),
+  case {byte_size(ClientPubKey), byte_size(ClientAuthToken)} of
+    {65, 16} ->
+      Salt = crypto:strong_rand_bytes(16),
+      {ServerPubKey, ServerPrivKey} = crypto:generate_key(ecdh, prime256v1),
+      {ok, encrypt(Message, ClientPubKey, ClientAuthToken, Salt, ServerPubKey, ServerPrivKey)};
+    {_, _} -> {error, invalid_pubkey_or_token}
+  end.
+
+%%==============================================================================================
+%% Internal functions
+%%==============================================================================================
 
 -spec encrypt( Message
              , ClientPubKey
@@ -36,18 +45,15 @@ encrypt(Message, ClientPubKey, ClientAuthToken) ->
              , Salt
              , ServerPubKey
              , ServerPrivKey
-             ) -> {ok, Result} | {error, Error} when
+             ) -> Result when
     Message :: binary(),
     ClientPubKey :: binary(),
     ClientAuthToken :: binary(),
     Salt :: binary(),
     ServerPubKey :: binary(),
     ServerPrivKey :: binary(),
-    Result :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
-    Error :: todo.
-encrypt(Message, ClientPubKey0, ClientAuthToken0, Salt, ServerPubKey, ServerPrivKey) ->
-  ClientPubKey = base64_url_decode(ClientPubKey0),
-  ClientAuthToken = base64_url_decode(ClientAuthToken0),
+    Result :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()}.
+encrypt(Message, ClientPubKey, ClientAuthToken, Salt, ServerPubKey, ServerPrivKey) ->
   SharedSecret = crypto:compute_key(ecdh, ClientPubKey, ServerPrivKey, prime256v1),
   PseudoRandomKey = hkdf( ClientAuthToken
                         , SharedSecret
@@ -56,11 +62,7 @@ encrypt(Message, ClientPubKey0, ClientAuthToken0, Salt, ServerPubKey, ServerPriv
                         ),
   ContentEncryptionKey = hkdf(Salt, PseudoRandomKey, ?CEKINFO, 16),
   Nonce = hkdf(Salt, PseudoRandomKey, ?NONCEINFO, 12),
-  {ok, {encrypt_payload(Message, ContentEncryptionKey, Nonce), Salt, ServerPubKey}}.
-
-%%==============================================================================================
-%% Internal functions
-%%==============================================================================================
+  {encrypt_payload(Message, ContentEncryptionKey, Nonce), Salt, ServerPubKey}.
 
 -spec hkdf(binary(), binary(), binary(), pos_integer()) -> binary().
 hkdf(Salt, InputKeyMaterial, Info, Length) ->
