@@ -1,8 +1,14 @@
 %% @doc {@module} allows preparing payloads for web push.
 -module(erl_web_push).
 
-%% API
--export([encrypt/3, request/1, request/2, vapid_request/2, vapid_request/3]).
+%% Encryption
+-export([encrypt/3]).
+
+%% Requests
+-export([request/1, request/2]).
+
+%% Vapid
+-export([vapid_request/2, vapid_request/3, generate_vapid_keys/0, vapid_public_key/0]).
 
 -ifdef(TEST).
 
@@ -10,8 +16,44 @@
 
 -endif.
 
+-type encryption_result() ::
+        {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()}.
+
+-export_type([encryption_result/0]).
+
 -define(CEKINFO, <<"Content-Encoding: aes128gcm\0">>).
 -define(NONCEINFO, <<"Content-Encoding: nonce\0">>).
+-define(RECORD_LENGTH, 4096).
+
+% See https://www.rfc-editor.org/rfc/rfc3279.html
+-define(PRIME256V1_OID, {1, 2, 840, 10045, 3, 1, 7}).
+
+%% @doc Returns the VAPID public key as set in the application env.
+%%
+%% Exits with a `badmatch' error if no VAPID public key was configured. To generate a keypair
+%% which you can add to the application env, see {@link generate_vapid_keys/0}.
+%%
+%% @throws {error, {badmatch, undefined}}
+
+-spec vapid_public_key() -> binary().
+vapid_public_key() ->
+  {ok, PubKey} = application:get_env(erl_web_push, vapid_public_key),
+  PubKey.
+
+%% @doc Generates a valid VAPID keypair, and returns a proplist for us in the application env.
+%%
+%% The generated keypair is usable with ECDSA over the P-256 curve, as specified in
+%% [https://tools.ietf.org/id/draft-ietf-webpush-vapid-03.html].
+%%
+%% These keys must be added to the application env, for example through `sys.config', in order
+%% to make use of functions like {@link vapid_request/2} and {@link vapid_request/3}.
+
+-spec generate_vapid_keys() -> proplists:proplist().
+generate_vapid_keys() ->
+  {PubKey, PrivKey} = crypto:generate_key(ecdh, prime256v1),
+  [ {vapid_public_key, base64_url_encode(PubKey)}
+  , {vapid_private_key, base64_url_encode(PrivKey)}
+  ].
 
 %% @doc Encrypts the `Message' according to the procedure as described in rfc8291 using the
 %% provided `ClientPubKey' (base64 encoded, url-safe or not) and `ClientAuthToken' (similar).
@@ -24,7 +66,7 @@
     Message :: binary(),
     ClientPubKey :: binary(),
     ClientAuthToken :: binary(),
-    Result :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
+    Result :: encryption_result(),
     Error :: message_too_long | invalid_pubkey_or_token.
 encrypt(Message, _, _) when byte_size(Message) > 4078 -> {error, message_too_long};
 encrypt(Message, ClientPubKey0, ClientAuthToken0) ->
@@ -38,15 +80,18 @@ encrypt(Message, ClientPubKey0, ClientAuthToken0) ->
     {_, _} -> {error, invalid_pubkey_or_token}
   end.
 
+%% @equiv request(Payload, 12 * 3600)
 -spec request(Payload) -> Result when
-    Payload :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
+    Payload :: encryption_result(),
     Result :: {Headers, Body},
     Headers :: [{binary(), binary()}],
     Body :: binary().
 request(Payload) -> request(Payload, 12 * 3600).
 
+%% @doc Prepares headers and body for an HTTP request, given the result of {@link encrypt/3} and
+%% a TTL expressed in seconds.
 -spec request(Payload, TTL) -> Result when
-    Payload :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
+    Payload :: encryption_result(),
     TTL :: non_neg_integer(),
     Result :: {Headers, Body},
     Headers :: [{binary(), binary()}],
@@ -55,68 +100,93 @@ request({Encrypted, Salt, PubKey}, TTL) when
     byte_size(Salt) =:= 16,
     byte_size(PubKey) =:= 65,
     TTL >= 0 ->
-  Now = erlang:system_time(second),
-  Expire = integer_to_binary(Now + TTL),
-  Headers = [ {<<"content-type">>, <<"application/octet-stream">>}
-            , {<<"content-encoding">>, <<"aesgcm">>}
-            , {<<"encryption">>, <<"salt=", (base64_url_encode(Salt))/binary>>}
-            , {<<"crypto-key">>, <<"dh=", (base64_url_encode(PubKey))/binary>>}
-            , {<<"ttl">>, Expire}
-            ],
-  {Headers, base64_url_encode(Encrypted)}.
+  Header = << Salt/binary
+            , ?RECORD_LENGTH:32/unsigned-big-integer
+            , (byte_size(PubKey)):8/unsigned-big-integer
+            , PubKey/binary
+           >>,
+  Headers = [{<<"content-encoding">>, <<"aes128gcm">>}, {<<"ttl">>, integer_to_binary(TTL)}],
+  {Headers, <<Header/binary, Encrypted/binary>>}.
 
+%% @equiv vapid_request(Target, Payload, 12*3600)
 -spec vapid_request(Target, Payload) -> Result when
     Target :: binary(),
-    Payload :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
+    Payload :: encryption_result(),
     Result :: {Headers, Body},
     Headers :: [{binary(), binary()}],
     Body :: binary().
 vapid_request(Target, Payload) -> vapid_request(Target, Payload, 12 * 3600).
 
-%% KeyInfo, json encoder: application config!
-%% Need to throw appropriate errors, too!
+%% @doc Prepares headers and body for an HTTP request leveraging VAPID.
+%%
+%% @see request/2
+%% @see generate_vapid_keypair/2
 
 -spec vapid_request(Target, Payload, TTL) -> Result when
     Target :: binary(),
-    Payload :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()},
+    Payload :: encryption_result(),
     TTL :: non_neg_integer(),
     Result :: {Headers, Body},
     Headers :: [{binary(), binary()}],
     Body :: binary().
 vapid_request(Target, Payload, TTL) ->
   Now = erlang:system_time(second),
-  Expire = integer_to_binary(Now + TTL),
+  Expire = Now + (12 * 3600),
   {Headers, Body} = request(Payload, TTL),
   {VapidPubKey, VapidPrivKey} = vapid_keys(),
-  JWTHeader = <<"{\"typ\": \"JWT\",\"alg\": \"ES256\"}">>,
-  JWTPayload = json_encode(#{ <<"aud">> => extract_audience(Target)
-                            , <<"exp">> => Expire
-                            , <<"sub">> => vapid_contact()
-                            }),
-  ToSign =
-    <<(base64_url_encode(JWTHeader))/binary, ".", (base64_url_encode(JWTPayload))/binary>>,
-  Signature = crypto:sign(ecdsa, sha256, ToSign, VapidPrivKey),
-  JWT = <<ToSign/binary, ".", (base64_url_encode(Signature))/binary>>,
-  {[{<<"crypto-key">>, CKHeader}], Rest} = proplists:split(<<"crypto-key">>, Headers),
-  { [ { <<"crypto-key">>
-      , <<CKHeader/binary, ",p256ecdsa=", (base64_url_encode(VapidPubKey))/binary>>
-      }
-    , {<<"authorization">>, <<"WebPush ", JWT/binary>>} | Rest
-    ]
+  JWT = sign_jwt( #{<<"typ">> => <<"JWT">>, <<"alg">> => <<"ES256">>}
+                , #{ <<"aud">> => extract_audience(Target)
+                   , <<"exp">> => Expire
+                   , <<"sub">> => vapid_contact()
+                   }
+                , VapidPrivKey
+                ),
+  { [{<<"authorization">>, <<"vapid t=", JWT/binary, ", k=", VapidPubKey/binary>>} | Headers]
   , Body
   }.
 
+%%==============================================================================================
+%% Internal functions
+%%==============================================================================================
+
+-spec sign_jwt(Header, Payload, PrivKey) -> Signed when
+    Header :: map(),
+    Payload :: map(),
+    PrivKey :: binary(),
+    Signed :: binary().
+sign_jwt(Header, Payload, PrivKey) ->
+  ToSign = << (base64_url_encode(json_encode(Header)))/binary
+            , "."
+            , (base64_url_encode(json_encode(Payload)))/binary
+           >>,
+  Asn1Sig = crypto:sign(ecdsa, sha256, ToSign, [base64_url_decode(PrivKey), prime256v1]),
+  {'ECDSA-Sig-Value', R, S} = public_key:der_decode('ECDSA-Sig-Value', Asn1Sig),
+  Signature = base64_url_encode(<<R:256, S:256>>),
+  <<ToSign/binary, ".", Signature/binary>>.
+
 -spec vapid_keys() -> {PubKey :: binary(), PrivKey :: binary()}.
-vapid_keys() -> {<<>>, <<>>}.
+vapid_keys() ->
+  {ok, PubKey} = application:get_env(erl_web_push, vapid_public_key),
+  {ok, PrivKey} = application:get_env(erl_web_push, vapid_private_key),
+  {PubKey, PrivKey}.
 
 -spec extract_audience(URL :: binary()) -> binary().
-extract_audience(X) -> X.
+extract_audience(X) ->
+  Top = uri_string:resolve(<<"/">>, X),
+  binary:part(Top, {0, byte_size(Top) - 1}).
 
 -spec vapid_contact() -> binary().
-vapid_contact() -> <<>>.
+vapid_contact() ->
+  {ok, Contact} = application:get_env(erl_web_push, vapid_contact),
+  Contact.
 
 -spec json_encode(map()) -> binary().
-json_encode(_) -> <<>>.
+json_encode(Val) ->
+  {M, F, A} = case application:get_env(erl_web_push, json_encode) of
+                {ok, {Modul, Fun}} -> {Modul, Fun, [Val]};
+                {ok, {Modul, Fun, Extra}} -> {Modul, Fun, [Val | Extra]}
+              end,
+  apply(M, F, A).
 
 %% @hidden
 -spec encrypt( Message
