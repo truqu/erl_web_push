@@ -18,8 +18,9 @@
 
 -type encryption_result() ::
         {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()}.
+-type encryption_error() :: message_too_long | invalid_pubkey_or_token.
 
--export_type([encryption_result/0]).
+-export_type([encryption_result/0, encryption_error/0]).
 
 -define(CEKINFO, <<"Content-Encoding: aes128gcm\0">>).
 -define(NONCEINFO, <<"Content-Encoding: nonce\0">>).
@@ -67,7 +68,7 @@ generate_vapid_keys() ->
     ClientPubKey :: binary(),
     ClientAuthToken :: binary(),
     Result :: encryption_result(),
-    Error :: message_too_long | invalid_pubkey_or_token.
+    Error :: encryption_error().
 encrypt(Message, _, _) when byte_size(Message) > 4078 -> {error, message_too_long};
 encrypt(Message, ClientPubKey0, ClientAuthToken0) ->
   ClientPubKey = base64_url_decode(ClientPubKey0),
@@ -202,7 +203,7 @@ json_encode(Val) ->
     Salt :: binary(),
     ServerPubKey :: binary(),
     ServerPrivKey :: binary(),
-    Result :: {Encrypted :: binary(), Salt :: binary(), ServerPubKey :: binary()}.
+    Result :: encryption_result().
 encrypt(Message, ClientPubKey, ClientAuthToken, Salt, ServerPubKey, ServerPrivKey) ->
   SharedSecret = crypto:compute_key(ecdh, ClientPubKey, ServerPrivKey, prime256v1),
   PseudoRandomKey = hkdf( ClientAuthToken
